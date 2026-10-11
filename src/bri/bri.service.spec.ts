@@ -57,7 +57,8 @@ describe('BriService', () => {
     };
     const prisma = {
       transaction: {
-        update: jest.fn().mockResolvedValue({
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue({
           ...existingTransaction,
           status: localStatus,
           gateDeviceId: 'gate-1',
@@ -80,11 +81,15 @@ describe('BriService', () => {
       }),
     ).resolves.toMatchObject({ status: localStatus });
 
-    expect(prisma.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: localStatus }),
-      }),
-    );
+    if (localStatus === 'PENDING') {
+      expect(prisma.transaction.updateMany).not.toHaveBeenCalled();
+    } else {
+      expect(prisma.transaction.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: localStatus }),
+        }),
+      );
+    }
     if (statusCode === '00') {
       expect(gate.openGateForTransaction).toHaveBeenCalledWith(
         'gate-1',
@@ -96,7 +101,7 @@ describe('BriService', () => {
   });
 
   it('preserves local status for refunded notifications', async () => {
-    const prisma = { transaction: { update: jest.fn() } };
+    const prisma = { transaction: { updateMany: jest.fn() } };
     const svc = new BriService(prisma as any, {} as any, {} as any);
 
     await expect(
@@ -109,7 +114,61 @@ describe('BriService', () => {
       externalTransactionStatus: '04',
       transactionStatusDesc: 'Refunded status requires local handling',
     });
-    expect(prisma.transaction.update).not.toHaveBeenCalled();
+    expect(prisma.transaction.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('processes duplicate success and late failure notifications idempotently', async () => {
+    const pendingTransaction = {
+      id: 'transaction-1',
+      partnerReferenceNo: 'partner-1',
+      amount: 2000,
+      status: 'PENDING',
+      gateDeviceId: 'gate-1',
+    };
+    const successfulTransaction = {
+      ...pendingTransaction,
+      status: 'SUCCESS',
+    };
+    const prisma = {
+      transaction: {
+        updateMany: jest
+          .fn()
+          .mockResolvedValueOnce({ count: 1 })
+          .mockResolvedValueOnce({ count: 0 })
+          .mockResolvedValueOnce({ count: 0 }),
+        findUnique: jest.fn().mockResolvedValue(successfulTransaction),
+      },
+    };
+    const gate = {
+      emitPaymentStatus: jest.fn(),
+      openGateForTransaction: jest.fn(),
+    };
+    const svc = new BriService(prisma as any, {} as any, gate as any);
+
+    await expect(
+      (svc as any).applyPaymentStatus(pendingTransaction, {
+        latestTransactionStatus: '00',
+      }),
+    ).resolves.toMatchObject({ status: 'SUCCESS' });
+    await expect(
+      (svc as any).applyPaymentStatus(pendingTransaction, {
+        latestTransactionStatus: '00',
+      }),
+    ).resolves.toMatchObject({ status: 'SUCCESS' });
+    await expect(
+      (svc as any).applyPaymentStatus(pendingTransaction, {
+        latestTransactionStatus: '06',
+      }),
+    ).resolves.toMatchObject({ status: 'SUCCESS' });
+
+    expect(prisma.transaction.updateMany).toHaveBeenCalledTimes(3);
+    expect(prisma.transaction.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { partnerReferenceNo: 'partner-1', status: 'PENDING' },
+      }),
+    );
+    expect(gate.emitPaymentStatus).toHaveBeenCalledTimes(1);
+    expect(gate.openGateForTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('matches the vendor webhook body-hash and hex-ASCII examples', () => {
@@ -160,16 +219,24 @@ describe('BriService', () => {
           status: 'PENDING',
           terminalId: 'ABC123',
         }),
-        update: jest.fn().mockResolvedValue({
-          partnerReferenceNo: 'test-ref-1',
-          amount: '2000.00',
-          status: 'SUCCESS',
-          terminalId: 'ABC123',
-          gateDeviceId: 'gate-1',
-          id: 'txn-1',
-        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
+    prisma.transaction.findUnique
+      .mockResolvedValueOnce({
+        partnerReferenceNo: 'test-ref-1',
+        amount: '2000.00',
+        status: 'PENDING',
+        terminalId: 'ABC123',
+      })
+      .mockResolvedValueOnce({
+        partnerReferenceNo: 'test-ref-1',
+        amount: '2000.00',
+        status: 'SUCCESS',
+        terminalId: 'ABC123',
+        gateDeviceId: 'gate-1',
+        id: 'txn-1',
+      });
 
     const gate = {
       emitPaymentStatus: jest.fn(),

@@ -386,13 +386,28 @@ export class BriService {
       };
     }
 
-    const updatedTransaction = await this.prisma.transaction.update({
-      where: { partnerReferenceNo: transaction.partnerReferenceNo },
+    if (status === transaction.status) {
+      return transaction;
+    }
+
+    const updateResult = await this.prisma.transaction.updateMany({
+      where: {
+        partnerReferenceNo: transaction.partnerReferenceNo,
+        status: status === 'SUCCESS' ? { not: 'SUCCESS' } : 'PENDING',
+      },
       data: {
         status,
         ...(status === 'SUCCESS' ? { paidAt: new Date() } : {}),
       },
     });
+
+    const updatedTransaction = await this.prisma.transaction.findUnique({
+      where: { partnerReferenceNo: transaction.partnerReferenceNo },
+    });
+    if (!updatedTransaction || updateResult.count === 0) {
+      return updatedTransaction ?? transaction;
+    }
+
     if (status === 'SUCCESS') {
       this.gateService.emitPaymentStatus({
         partnerReferenceNo: updatedTransaction.partnerReferenceNo,
