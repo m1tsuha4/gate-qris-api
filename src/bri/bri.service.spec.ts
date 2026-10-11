@@ -41,6 +41,77 @@ describe('BriService', () => {
     }
   });
 
+  it.each([
+    ['00', 'SUCCESS'],
+    ['01', 'PENDING'],
+    ['02', 'PENDING'],
+    ['03', 'PENDING'],
+    ['05', 'CANCELLED'],
+    ['06', 'FAILED'],
+  ])('maps BRI status %s to %s', async (statusCode, localStatus) => {
+    const existingTransaction = {
+      id: 'transaction-1',
+      partnerReferenceNo: 'partner-1',
+      amount: 2000,
+      status: 'PENDING',
+    };
+    const prisma = {
+      transaction: {
+        update: jest.fn().mockResolvedValue({
+          ...existingTransaction,
+          status: localStatus,
+          gateDeviceId: 'gate-1',
+        }),
+      },
+    };
+    const gate = {
+      emitPaymentStatus: jest.fn(),
+      openGateForTransaction: jest.fn(),
+    };
+    const svc = new BriService(
+      prisma as any,
+      { getQrAmount: jest.fn() } as any,
+      gate as any,
+    );
+
+    await expect(
+      (svc as any).applyPaymentStatus(existingTransaction, {
+        latestTransactionStatus: statusCode,
+      }),
+    ).resolves.toMatchObject({ status: localStatus });
+
+    expect(prisma.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: localStatus }),
+      }),
+    );
+    if (statusCode === '00') {
+      expect(gate.openGateForTransaction).toHaveBeenCalledWith(
+        'gate-1',
+        'transaction-1',
+      );
+    } else {
+      expect(gate.openGateForTransaction).not.toHaveBeenCalled();
+    }
+  });
+
+  it('preserves local status for refunded notifications', async () => {
+    const prisma = { transaction: { update: jest.fn() } };
+    const svc = new BriService(prisma as any, {} as any, {} as any);
+
+    await expect(
+      (svc as any).applyPaymentStatus(
+        { partnerReferenceNo: 'partner-1', amount: 2000, status: 'SUCCESS' },
+        { latestTransactionStatus: '04' },
+      ),
+    ).resolves.toMatchObject({
+      localTransactionStatus: 'SUCCESS',
+      externalTransactionStatus: '04',
+      transactionStatusDesc: 'Refunded status requires local handling',
+    });
+    expect(prisma.transaction.update).not.toHaveBeenCalled();
+  });
+
   it('matches the vendor webhook body-hash and hex-ASCII examples', () => {
     const rawBody =
       '{"originalReferenceNo":"648681020722","originalPartnerReferenceNo":"000008526196","latestTransactionStatus":"00","transactionStatusDesc":"success","customerNumber":"9360000213214291591","accountType":"Unspecified Acct","destinationAccountName":"LAILI SEPTIAN ZUFRI YAHYA","amount":{"value":"5000.00","currency":"IDR"},"bankCode":"002","AdditionalInfo":{"ReffId":"2004429726","issuerName":"BRI","issuerRrn":"296259544768"}}';

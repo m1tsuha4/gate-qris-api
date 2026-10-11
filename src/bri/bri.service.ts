@@ -367,21 +367,33 @@ export class BriService {
   ) {
     const statusCode = this.getString(payload, 'latestTransactionStatus');
     const responseCode = this.getString(payload, 'responseCode');
-    const success = statusCode === '00' || responseCode === '2000000';
-    const failed = ['01', '02', '03', '04', '05'].includes(statusCode ?? '');
+    const status = statusCode
+      ? this.mapTransactionStatus(statusCode)
+      : responseCode === '2000000'
+        ? 'SUCCESS'
+        : undefined;
 
-    if (!success && !failed) {
-      return { ...payload, localTransactionStatus: transaction.status };
+    if (!status) {
+      return {
+        ...payload,
+        localTransactionStatus: transaction.status,
+        ...(statusCode === '04'
+          ? {
+              externalTransactionStatus: statusCode,
+              transactionStatusDesc: 'Refunded status requires local handling',
+            }
+          : {}),
+      };
     }
 
     const updatedTransaction = await this.prisma.transaction.update({
       where: { partnerReferenceNo: transaction.partnerReferenceNo },
       data: {
-        status: success ? 'SUCCESS' : 'FAILED',
-        ...(success ? { paidAt: new Date() } : {}),
+        status,
+        ...(status === 'SUCCESS' ? { paidAt: new Date() } : {}),
       },
     });
-    if (success) {
+    if (status === 'SUCCESS') {
       this.gateService.emitPaymentStatus({
         partnerReferenceNo: updatedTransaction.partnerReferenceNo,
         transactionId: updatedTransaction.id,
@@ -394,6 +406,25 @@ export class BriService {
       );
     }
     return updatedTransaction;
+  }
+
+  private mapTransactionStatus(
+    statusCode: string,
+  ): 'SUCCESS' | 'PENDING' | 'FAILED' | 'CANCELLED' | undefined {
+    switch (statusCode) {
+      case '00':
+        return 'SUCCESS';
+      case '01':
+      case '02':
+    case '03':
+        return 'PENDING';
+      case '05':
+        return 'CANCELLED';
+      case '06':
+        return 'FAILED';
+      default:
+        return undefined;
+    }
   }
 
   private verifyWebhookSignature(
